@@ -38,7 +38,7 @@ COMMON_URI="${DM_HOME}/dmraid-${VERSION_DMRAID}.tar.bz2
 		mirror://gnupg/gnupg/gnupg-${VERSION_GPG}.tar.bz2"
 
 GITHUB_REPO="${PN}"
-GITHUB_USER="funtoo"
+GITHUB_USER="robotrongt"
 GITHUB_TAG="v${PVR}-funtoo"
 
 SRC_URI="${COMMON_URI} https://www.github.com/${GITHUB_USER}/${GITHUB_REPO}/tarball/${GITHUB_TAG} -> ${PN}-${GITHUB_TAG}.tar.gz"
