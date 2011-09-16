@@ -5,6 +5,9 @@ import commands
 
 debug = False
 
+os.putenv("FEATURES","mini-manifest")
+mergeLog = open("/var/tmp/merge.log","w")
+
 def headSHA1(tree):
 	head = None
 	hfile = os.path.join(tree,".git/HEAD")
@@ -36,6 +39,25 @@ def runShell(string,abortOnFail=True):
 class MergeStep(object):
 	pass
 
+class ThirdPartyMirrors(MergeStep):
+
+	def run(self,tree):
+		orig = "%s/profiles/thirdpartymirrors" % tree.root
+		new = "%s/profiles/thirdpartymirrors.new" % tree.root
+		a = open(orig, "r")
+		b = open(new, "w")
+		for line in a:
+			ls = line.split()
+			if len(ls) and ls[0] == "gentoo":
+				b.write("gentoo\t"+ls[1]+" http://www.funtoo.org/distfiles "+" ".join(ls[2:])+"\n")
+			else:
+				b.write(line)
+		a.close()
+		b.close()
+		os.unlink(orig)
+		os.link(new, orig)
+		os.unlink(new)
+
 class ApplyPatchSeries(MergeStep):
 	def __init__(self,path):
 		self.path = path
@@ -46,6 +68,7 @@ class ApplyPatchSeries(MergeStep):
 			if line[0:1] == "#":
 				continue
 			runShell( "( cd %s; git apply %s/%s )" % ( tree.root, self.path, line[:-1] ))
+
 
 class SyncDir(MergeStep):
 	def __init__(self,srcroot,srcdir=None,destdir=None,exclude=[],delete=False):
@@ -86,12 +109,27 @@ class SyncTree(SyncDir):
 		desttree.logTree(self.srctree)
 
 class Tree(object):
-	def __init__(self,name,root,pull=False):
+	def __init__(self,name,branch="master",url=None,pull=False, trylocal=None):
 		self.name = name
-		self.root = root
+		self.branch = branch
+		self.url = url
 		self.merged = []
-		if pull:
-			runShell("(cd %s; git pull)" % self.root)		
+		self.trylocal = trylocal
+		if self.trylocal and os.path.exists(self.trylocal):
+			base = os.path.basename(self.trylocal)
+			self.root = trylocal
+		else:
+			base = "/var/git/source-trees"
+			self.root = "%s/%s" % ( base, self.name )
+		if not os.path.exists(base):
+			os.makedirs(base)
+		if os.path.exists(self.root):
+			runShell("(cd %s; git checkout %s)" % ( self.root, self.branch ))
+			if pull:
+				runShell("(cd %s; git pull origin %s)" % ( self.root, self.branch ))
+		else:
+			runShell("(cd %s; git clone %s %s)" % ( base, self.url, self.name ))
+			runShell("(cd %s; git checkout %s)" % ( self.root, self.branch ))
 
 	def head(self):
 		return headSHA1(self.root)
@@ -109,7 +147,9 @@ class Tree(object):
 class UnifiedTree(Tree):
 	def __init__(self,root,steps):
 		self.steps = steps
-		Tree.__init__(self,name=None,root=root,pull=False)
+		self.root = root
+		self.name = None
+		self.merged = []
 
 	def run(self):
 		for step in self.steps:
@@ -194,10 +234,18 @@ class InsertEbuilds(MergeStep):
 				tpkgdir = os.path.join(desttree.root,cat)
 				tpkgdir = os.path.join(tpkgdir,pkg)
 				copy = False
+				copied = False
 				if self.replace == True or (type(self.replace) == types.ListType and "%s/%s" % (cat,pkg) in self.replace):
 					runShell("rm -rf %s; cp -a %s %s" % (tpkgdir, pkgdir, tpkgdir ))
+					copied = True
 				else:
+					if not os.path.exists(tpkgdir):
+						copied = True
 					runShell("[ ! -e %s ] && cp -a %s %s || echo \"# skipping %s/%s\"" % (tpkgdir, pkgdir, tpkgdir, cat, pkg ))
+				if copied:
+					# log here.
+					cpv = "/".join(tpkgdir.split("/")[-2:])
+					mergeLog.write("%s\n" % cpv)
 
 class ProfileDepFix(MergeStep):
 
@@ -233,32 +281,50 @@ class Minify(MergeStep):
 # CHANGE TREE CONFIGURATION BELOW:
 
 pull = True
-if len(sys.argv) > 1 and sys.argv[1] == "nopush":
+if len(sys.argv) > 1 and "nopush" in sys.argv[1:]:
 	push = False
 else:
 	push = "origin funtoo.org"
 
-gentoo_src = Tree("gentoo","/var/git/portage-gentoo")
-funtoo_overlay = Tree("funtoo-overlay", "/root/git/funtoo-overlay",pull=True)
-tarsius_overlay = Tree("tarsius-overlay", "/root/git/tarsius-overlay",pull=True)
-foo_overlay = Tree("foo-overlay", "/root/git/foo-overlay",pull=True)
-bar_overlay = Tree("bar-overlay","/root/git/bar-overlay", pull=True)
-multimedia_overlay = Tree("multimedia-overlay", "/root/git/multimedia-overlay",pull=True)
-golodhrim_overlay = Tree("golodhrim-overlay", "/root/git/golodhrim-overlay",pull=True)
+gentoo_src = Tree("gentoo","gentoo.org", "git://github.com/funtoo/portage.git", pull=True, trylocal="/var/git/portage-gentoo")
+funtoo_overlay = Tree("funtoo-overlay", "master", "git://github.com/funtoo/funtoo-overlay.git", pull=True)
+foo_overlay = Tree("foo-overlay", "master", "https://github.com/slashbeast/foo-overlay.git", pull=True)
+bar_overlay = Tree("bar-overlay", "master", "git://github.com/adessemond/bar-overlay.git", pull=True)
+flora_overlay = Tree("flora", "master", "https://github.com/funtoo/flora.git", pull=True)
+felicitus_overlay = Tree("felicitus-overlay", "master", "https://github.com/timoahummel/felicitus_overlay.git", pull=True)
+
+if len(sys.argv) > 1 and sys.argv[1][0] == "/":
+	dest = sys.argv[1]
+	branch = "funtoo.org" 
+else:
+	dest = "/var/git/portage-mini-2011"
+	branch = "funtoo.org"
+
+for test in [ dest ]:
+	if not os.path.isdir(test):
+		os.makedirs(test)
+	if not os.path.isdir("%s/.git" % test):
+		runShell("( cd %s; git init )" % test )
+		runShell("echo 'created by merge.py' > %s/README" % test )
+		runShell("( cd %s; git add README; git commit -a -m 'initial commit by merge.py' )" % test )
+		runShell("( cd %s; git checkout -b funtoo.org; git rm -f README; git commit -a -m 'initial funtoo.org commit' )" % test )
+		print("Pushing disabled automatically because repository created from scratch.")
+		push = False
 
 steps = [
-	SyncTree(gentoo_src,exclude=["/metadata/cache/**","sys-kernel/openvz-sources"]),
+	SyncTree(gentoo_src,exclude=["/metadata/cache/**","ChangeLog"]),
 	ApplyPatchSeries("%s/funtoo/patches" % funtoo_overlay.root ),
+	ThirdPartyMirrors(),
 	SyncDir(funtoo_overlay.root,"profiles","profiles", exclude=["repo_name","categories"]),
 	ProfileDepFix(),
 	SyncDir(funtoo_overlay.root,"licenses"),
 	SyncDir(funtoo_overlay.root,"eclass"),
 	InsertEbuilds(funtoo_overlay, select="all", skip=None, replace=True),
-	InsertEbuilds(tarsius_overlay, select="all", skip=None, replace=["sys-libs/libixp","x11-wm/wmii","dev-vcs/cvsps","net-print/foo2zjs"]),
-	InsertEbuilds(foo_overlay, select="all", skip=None, replace=["app-shells/rssh"]),
+	InsertEbuilds(foo_overlay, select="all", skip=None, replace=["app-shells/rssh","net-misc/unison"]),
 	InsertEbuilds(bar_overlay, select="all", skip=None, replace=True),
-	InsertEbuilds(multimedia_overlay, select=["media-video/mplayer-uau"], skip=None, replace=False),
-	InsertEbuilds(golodhrim_overlay, select="all", skip=None, replace=False),
+	InsertEbuilds(flora_overlay, select="all", skip=None, replace=False),
+	InsertEbuilds(felicitus_overlay, select="all", skip=None, replace=False),
+	Minify(),
 	GenCache()
 ]
 
@@ -268,24 +334,12 @@ work = UnifiedTree("/var/src/merge-portage-work",steps)
 work.run()
 
 steps = [
-	GitPrep("funtoo.org"),
+	GitPrep(branch),
 	SyncTree(work)
 ]
 
 # then for the production tree, we rsync all changes on top of our prod git tree and commit:
 
-prod = UnifiedTree("/var/git/portage-prod",steps)
+prod = UnifiedTree(dest,steps)
 prod.run()
 prod.gitCommit(message="glorious funtoo updates",push=push)
-
-# then for the mini tree, we rsync all work changes on top of our mini git tree, minify, and commit:
-
-mini = UnifiedTree("/var/git/portage-mini-2010", [ 
-	GitPrep("funtoo.org"), 
-	SyncTree(work, exclude=["ChangeLog"]), 
-	Minify() 
-])
-
-mini.run()
-mini.gitCommit(message="glorious funtoo updates",push=push)
-
